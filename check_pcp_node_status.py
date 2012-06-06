@@ -18,7 +18,7 @@ def usage():
         usage() calls nagios_return()
   """
   nagios_return('UNKNOWN',
-      "usage: %s -H host -P port -u user -p pass -n node" % sys.argv[0])
+      "usage: %s -H host -P port -u user -p pass [-n node]" % sys.argv[0])
 
 def nagios_return(code, response):
   """ prints the response message
@@ -29,26 +29,79 @@ def nagios_return(code, response):
   print code + ": " + response
   sys.exit(nagios_codes[code])
 
-def check_condition(host, port, user, pwd, node):
+def do_nodeinfo_check(host, port, user, pwd, node):
+  retcode=0
   args = ["pcp_node_info", "30", host, port, user, pwd, node]
+  try:
+      p = subprocess.Popen(args, stdout=subprocess.PIPE)
+  except OSError:
+    retcode=-1
+    s = 0
+    w = 0
+  if (retcode!=-1):
+    p.wait()
+    retcode = p.returncode
+    out = p.communicate()[0].strip()
+    ov = out.split()
+    s = ov[2]
+    w = ov[3]
+  return [retcode, s, w]
+
+def get_node_count(host, port, user, pwd):
+  retcode=0
+  args = ["pcp_node_count", "30", host, port, user, pwd]
   try:
     p = subprocess.Popen(args, stdout=subprocess.PIPE)
   except OSError:
     retcode=-1
-  p.wait()
-  retcode = p.returncode
-  out = p.communicate()[0]
-  out.strip()
-  ov = out.split()
-  if (retcode!=0):
-    ret={"code": "UNKNOWN", "message": "pcp_node_info returned non zero"}
-  else:
-    if (ov[2] == '2'):
-      ret={"code": "OK", "message": "Node Status OK - Weight %s" % ov[3]}
-    elif (ov[2] == '3'):
-      ret={"code": "CRITICAL", "message": "Node Status CRITICAL - Node down"}
+    c=0
+  if (retcode!=-1):
+    p.wait()
+    retcode = p.returncode
+    out = p.communicate()[0].strip()
+    c=int(out)
+  return [retcode,c]
+
+
+def check_condition(host, port, user, pwd, node):
+  ret={}
+  if (node!=None):
+    (retcode, status, weight) = do_nodeinfo_check(host, port, user, pwd, node)
+    if (retcode!=0):
+      ret={"code": "UNKNOWN", "message": "pcp_node_info returned non zero"}
     else:
-      ret={"code": "UNKNOWN", "message": "Node Status Unknown - %s" % ov[2]}
+      if (status == '2'):
+        ret={"code": "OK", "message": "Node Status OK - Weight %s" % weight}
+      elif (status == '3'):
+        ret={"code": "CRITICAL", "message": "Node Status CRITICAL - Node down"}
+      else:
+        ret={"code": "UNKNOWN", "message": "Node Status Unknown - %s" % status}
+  else:
+    upnodes=[]
+    downnodes=[]
+    (r,count)=get_node_count(host, port, user, pwd)
+    if (r==-1):
+      ret={"code": "UNKNOWN", "message": "Error running pcp_node_count"}
+    for i in range(count):
+      (retcode, status, weight) = do_nodeinfo_check(host, port, user, pwd, str(i))
+      if (retcode!=0):
+        ret={"code": "UNKNOWN", "message": "pcp_node_info returned non zero"}
+        break
+      if (status=='2'):
+        upnodes.append([i,status])
+      else:
+        downnodes.append([i,status])
+
+    if (ret.has_key("code")):
+      return ret  # Ug I hate returning in more than 1 place in a function
+
+    if (len(downnodes)==0):
+      ret={"code": "OK", "message": "%d nodes up" % count}
+    else:
+      m = ""
+      for n in downnodes:
+        m = m + "Node: %s, Status: %s " % (n[0], n[1])
+      ret={"code": "CRITICAL", "message": m}
   return ret
 
 def main():
@@ -79,7 +132,7 @@ def main():
       node = value
     else:
       usage()
-  if (host == None or port == None or user == None or pwd == None or node == None):
+  if (host == None or port == None or user == None or pwd == None):
     usage()
 
   result = check_condition(host, port, user, pwd, node)
